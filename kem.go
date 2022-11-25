@@ -236,6 +236,7 @@ func encryptChaPoly(data []byte, keys io.Reader) (string, error) {
 		return "", errors.New("error calculating symmetric key")
 	}
 
+	fmt.Println("symmetric key: " + hexutil.Encode(skey))
 	aead, e := chacha20poly1305.New(skey)
 	if e != nil {
 		return "", e
@@ -355,6 +356,8 @@ func decryptChaPoly(data []byte, keys io.Reader) ([]byte, error) {
 	if n < keySize || e != nil {
 		return nil, errors.New("error calculating symmetric key")
 	}
+
+	fmt.Println("symmetric key: " + hexutil.Encode(skey))
 
 	aead, e := chacha20poly1305.New(skey)
 	if e != nil {

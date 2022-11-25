@@ -91,6 +91,9 @@ func roundTrip(version string, privateKey []byte) string {
 	Rsig := R + hexutil.Encode(sig)[2:]
 	Singersig := signerPubKey + hexutil.Encode(sig2)[2:]
 
+	fmt.Println("Signed R: " + Rsig)
+	fmt.Println("Signed signerPubKey: " + Singersig)
+
 	cipher, e := wrapPrivateKey(version, Rsig, Singersig, oob, salt, addr)
 	if e != nil {
 		fmt.Println(e.Error())
