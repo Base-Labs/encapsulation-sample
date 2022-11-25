@@ -1,7 +1,6 @@
 package encapsulation_sample
 
 import (
-	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ed25519"
@@ -19,10 +18,17 @@ import (
 	"strings"
 )
 
-// implementation MUST keep the key pairs securely, below is insecure and just for demo purposes
-var insecureHolderSecp256k1 = map[string]([]byte){}
-var insecureHolderEd25519 = map[string](ed25519.PrivateKey){}
+// insecure and just for demo purposes
 var inseaureWallet = map[string]([]byte){} // address -- private key mapping for Ethereum
+
+var r, s, signer, trusted []byte
+
+func init() {
+	r, _ = hexutil.Decode("0x6f2dd2a7804705d2d536bee92221051865a639efa23f5ca7c810e77048253a79")
+	s, _ = hexutil.Decode("0x28fa2db9f916e44fcc88370bedaf5eb3ec45632f040f4c1450c0f101e1e8bac8")
+	signer, _ = hexutil.Decode("0xac304db075d1685284ba5e10c343f2324ee32df3394fc093c98932517d36e344")
+	trusted, _ = hexutil.Decode("0xda6649d68fc03b807e444e0034b3b59ec60716212007d72c9ddbfd33e25d38d1")
+}
 
 func generatePrivateKey() ([]byte, error) {
 	privateKey := make([]byte, 32)
@@ -50,14 +56,14 @@ func derivePublicKey(version string, privateKey string) (compressedPub string, e
 		x, y := secp256k1.S256().ScalarBaseMult(priv)
 		pubKey = secp256k1.CompressPubkey(x, y)
 		pubKeyStr := hexutil.Encode(pubKey)
-		insecureHolderSecp256k1[pubKeyStr] = priv
 
 		return pubKeyStr, nil
-	} else if strings.HasPrefix(v, "ed25519") {
-		pub := ed25519.NewKeyFromSeed(priv).Public()
-		pubKey, _ = pub.([]byte)
-		pubKeyStr := hexutil.Encode(pubKey)
-		insecureHolderEd25519[pubKeyStr] = priv
+	} else if strings.HasPrefix(v, "curve25519") {
+		// https://www.rfc-editor.org/rfc/rfc7748.html#section-6.1
+		// not an actual public key
+		pub := make([]byte, 32)
+		curve25519.ScalarBaseMult((*[32]byte)(pub), (*[32]byte)(priv))
+		pubKeyStr := hexutil.Encode(pub)
 
 		return pubKeyStr, nil
 	} else {
@@ -77,21 +83,16 @@ func generateEphemeralKeyPair(version, signerPubkey string) (compressedPub strin
 		var sig []byte
 
 		if strings.HasPrefix(v, "secp256k1") {
-			signer := insecureHolderSecp256k1[pubStr] // assuming we already have the signer private key -- this is NOT production code
-			if signer == nil {
-				return "", errors.New("no signer found for " + signerPubkey)
+			// SHA256 first
+			sum := sha256.Sum256([]byte(pubStr))
+			sig, err = secp256k1.Sign(sum[:], signer)
+			if err != nil {
+				return "", err
 			}
-			sig, err = secp256k1.Sign([]byte(pubStr), signer)
-		} else if strings.HasPrefix(v, "ed25519") {
-			signer := insecureHolderEd25519[pubStr]
-			if signer == nil {
-				return "", errors.New("no signer found for " + signerPubkey)
-			}
-			sig, err = signer.Sign(rand.Reader, []byte(pubStr), crypto.Hash(0))
-		}
 
-		if err != nil {
-			return "", err
+			sig = sig[:64]
+		} else if strings.HasPrefix(v, "curve25519") {
+			sig = ed25519.Sign(signer, []byte(pubStr))
 		}
 
 		pubStr = pubStr + hexutil.Encode(sig)[2:]
@@ -105,7 +106,7 @@ func generateWalletEntry(privateKey []byte) string {
 	addr := ecrypto.Keccak256(x.Bytes(), y.Bytes())[12:32]
 	account := hexutil.Encode(addr)
 	inseaureWallet[account] = privateKey
-	fmt.Println("putting address into wallet: " + account)
+	//fmt.Println("putting address into wallet: " + account)
 	return account
 }
 
@@ -118,7 +119,7 @@ func wrapPrivateKey(version, R, signerPubKey string, oob, salt []byte, account s
 	// verify signature to R
 	// verify signerPubKey TODO
 
-	s, _ := generatePrivateKey()
+	//s, _ := generatePrivateKey() -- we use fixed value to generate test vectors
 	S, _ := derivePublicKey(version, hexutil.Encode(s))
 
 	v := strings.ToLower(version)
@@ -126,16 +127,29 @@ func wrapPrivateKey(version, R, signerPubKey string, oob, salt []byte, account s
 	var sharedSecret []byte
 
 	if strings.HasPrefix(v, "secp256k1") {
-		Rx, Ry := secp256k1.DecompressPubkey(RBytes)
-		SSx, SSy := secp256k1.S256().ScalarMult(Rx, Ry, s)
-		sharedSecret = make([]byte, 64)
-		SSx.FillBytes(sharedSecret[:32])
-		SSy.FillBytes(sharedSecret[32:])
-	} else if strings.HasPrefix(v, "ed25519") {
-		sharedSecret, _ = curve25519.X25519(RBytes, s)
+		if len(signerPubKey) > 0 && !verifySecp256k1(RBytes[:33], RBytes[33:], signerPubKey) {
+			return "", errors.New("signature verification failed")
+		}
+
+		Rx, Ry := secp256k1.DecompressPubkey(RBytes[:33])
+		if Rx == nil || Ry == nil {
+			return "", errors.New("invalid public key: " + R[:68])
+		}
+
+		SSx, _ := secp256k1.S256().ScalarMult(Rx, Ry, s)
+		sharedSecret = make([]byte, 32) // compact representation https://www.rfc-editor.org/rfc/rfc5903.html section 9
+		SSx.FillBytes(sharedSecret)     // ensuring leading 00s if any
+	} else if strings.HasPrefix(v, "curve25519") {
+		if len(signerPubKey) > 0 && !verifyEd25519(RBytes[:32], RBytes[32:], signerPubKey) {
+			return "", errors.New("signature verification failed")
+		}
+
+		sharedSecret, _ = curve25519.X25519(s, RBytes[:32])
 	} else {
 		return "", errors.New("unsupported version: " + version)
 	}
+
+	fmt.Println("shared secret in the sender side: " + hexutil.Encode(sharedSecret))
 
 	reader := hkdf.New(sha256.New, sharedSecret, salt, oob)
 	var cipher string
@@ -154,22 +168,26 @@ func wrapPrivateKey(version, R, signerPubKey string, oob, salt []byte, account s
 	return S + cipher, err
 }
 
+func verifySecp256k1(msg, sig []byte, signerPubKey string) bool {
+	sum := sha256.Sum256(msg)
+	signerPubBytes, _ := hexutil.Decode(signerPubKey)
+
+	if len(signerPubBytes) > 33 {
+		// signerPubKey is further signed, check if it is signed by trusted public key
+	}
+
+	return secp256k1.VerifySignature(signerPubBytes[:33], sum[:], sig) // the underlying library can handle compressed public key
+}
+
+func verifyEd25519(msg, sig []byte, signerPubKey string) bool {
+	pub, _ := hexutil.Decode(signerPubKey)
+	return ed25519.Verify(pub, msg, sig)
+}
+
 func encryptAesGcm(keySize int, data []byte, keys io.Reader) (string, error) {
-	skey := make([]byte, keySize)
-	n, e := keys.Read(skey)
-
-	if n < keySize || e != nil {
-		return "", errors.New("error calculating symmetric key")
-	}
-
-	block, e := aes.NewCipher(skey)
-	if e != nil {
-		return "", e
-	}
-
-	aead, e := cipher.NewGCM(block)
-	if e != nil {
-		return "", e
+	aead, err := prepAes(keySize, keys)
+	if err != nil {
+		return "", err
 	}
 
 	return aeadSeal(aead, keys, data)
@@ -200,6 +218,8 @@ func aeadSeal(aead cipher.AEAD, keys io.Reader, data []byte) (string, error) {
 		return "", errors.New("error calculate the nonce")
 	}
 
+	fmt.Println("IV/nonce: " + hexutil.Encode(IV))
+
 	dst := aead.Seal(nil, IV, data, nil)
 
 	return hexutil.Encode(dst)[2:], nil
@@ -216,20 +236,24 @@ func intakePrivateKey(version, R string, oob, salt []byte, data string) (string,
 		cipherBytes = dataBytes[33:]
 
 		Sx, Sy := secp256k1.DecompressPubkey(SBytes)
-		r := insecureHolderSecp256k1[R]
-		SSx, SSy := secp256k1.S256().ScalarMult(Sx, Sy, r)
-		sharedSecret = make([]byte, 64)
-		SSx.FillBytes(sharedSecret[:32])
-		SSy.FillBytes(sharedSecret[32:])
-	} else if strings.HasPrefix(v, "ed25519") {
+		if Sx == nil || Sy == nil {
+			return "", errors.New("invalid public key: " + data[:68])
+		}
+		//r := insecureHolderSecp256k1[R[:68]]
+		x, _ := secp256k1.S256().ScalarMult(Sx, Sy, r) // only x coordinate is needed
+
+		sharedSecret = make([]byte, 32)
+		sharedSecret = x.FillBytes(sharedSecret)
+	} else if strings.HasPrefix(v, "curve25519") {
 		SBytes := dataBytes[:32]
 		cipherBytes = dataBytes[32:]
 
-		r := insecureHolderEd25519[R]
-		sharedSecret, _ = curve25519.X25519(SBytes, r)
+		sharedSecret, _ = curve25519.X25519(r, SBytes)
 	} else {
 		return "", errors.New("unsupported version: " + version)
 	}
+
+	fmt.Println("shared secret in the recipient side: " + hexutil.Encode(sharedSecret))
 
 	reader := hkdf.New(sha256.New, sharedSecret, salt, oob)
 	var cipher []byte
@@ -259,12 +283,23 @@ func intakePrivateKey(version, R string, oob, salt []byte, data string) (string,
 }
 
 func decryptAesGcm(keySize int, data []byte, keys io.Reader) ([]byte, error) {
+	aead, err := prepAes(keySize, keys)
+	if err != nil {
+		return nil, err
+	}
+
+	return aeadOpen(aead, keys, data)
+}
+
+func prepAes(keySize int, keys io.Reader) (cipher.AEAD, error) {
 	skey := make([]byte, keySize)
 	n, e := keys.Read(skey)
 
 	if n < keySize || e != nil {
 		return nil, errors.New("error calculating symmetric key")
 	}
+
+	fmt.Println("symmetric key: " + hexutil.Encode(skey))
 
 	block, e := aes.NewCipher(skey)
 	if e != nil {
@@ -275,8 +310,7 @@ func decryptAesGcm(keySize int, data []byte, keys io.Reader) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
-
-	return aeadOpen(aead, keys, data)
+	return aead, nil
 }
 
 func decryptChaPoly(data []byte, keys io.Reader) ([]byte, error) {
@@ -303,6 +337,8 @@ func aeadOpen(aead cipher.AEAD, keys io.Reader, data []byte) ([]byte, error) {
 	if n < ivSize || e != nil {
 		return nil, errors.New("error calculate the nonce")
 	}
+
+	fmt.Println("IV/nonce: " + hexutil.Encode(IV))
 
 	return aead.Open(nil, IV, data, nil)
 }
