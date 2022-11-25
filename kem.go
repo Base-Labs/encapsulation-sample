@@ -97,10 +97,11 @@ func generateEphemeralKeyPair(version, signerPubkey string) (compressedPub strin
 
 func signInVersion(version string, msg string, signer []byte) ([]byte, error) {
 	v := strings.ToLower(version)
+	msgBytes, _ := hexutil.Decode(msg)
 
 	if strings.HasPrefix(v, "secp256k1") {
 		// SHA256 first
-		sum := sha256.Sum256([]byte(msg))
+		sum := sha256.Sum256(msgBytes)
 		sig, err := secp256k1.Sign(sum[:], signer)
 		if err != nil {
 			return nil, err
@@ -110,7 +111,7 @@ func signInVersion(version string, msg string, signer []byte) ([]byte, error) {
 		return sig, nil
 	} else if strings.HasPrefix(v, "curve25519") {
 		pkey := ed25519.NewKeyFromSeed(signer)
-		return ed25519.Sign(pkey, []byte(msg)), nil
+		return ed25519.Sign(pkey, msgBytes), nil
 	}
 
 	return nil, errors.New("unsupported version: " + version)
@@ -198,7 +199,8 @@ func wrapPrivateKey(version, R, signerPubKey string, oob, salt []byte, account s
 }
 
 func verifySecp256k1(msg string, sig []byte, signerPubKey string) bool {
-	sum := sha256.Sum256([]byte(msg))
+	msgBytes, _ := hexutil.Decode(msg)
+	sum := sha256.Sum256(msgBytes)
 	signerPubBytes, _ := hexutil.Decode(signerPubKey)
 
 	if len(signerPubBytes) > 33 {
@@ -210,12 +212,13 @@ func verifySecp256k1(msg string, sig []byte, signerPubKey string) bool {
 
 func verifyEd25519(msg string, sig []byte, signerPubKey string) bool {
 	signerPubBytes, _ := hexutil.Decode(signerPubKey)
+	msgBytes, _ := hexutil.Decode(msg)
 
 	if len(signerPubBytes) > 32 {
 		// signerPubKey is further signed, check if it is signed by trusted public key
 	}
 
-	return ed25519.Verify(signerPubBytes[:32], []byte(msg), sig)
+	return ed25519.Verify(signerPubBytes[:32], msgBytes, sig)
 }
 
 func encryptAesGcm(keySize int, data []byte, keys io.Reader) (string, error) {
