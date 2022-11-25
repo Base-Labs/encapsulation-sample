@@ -39,7 +39,7 @@ func generatePrivateKey() ([]byte, error) {
 	return privateKey, nil
 }
 
-func derivePublicKey(version string, privateKey string) (compressedPub string, err error) {
+func derivePublicKey(version string, privateKey string, signer bool) (compressedPub string, err error) {
 	if len(version) == 0 {
 		return "", errors.New("version must not be empty")
 	}
@@ -59,13 +59,18 @@ func derivePublicKey(version string, privateKey string) (compressedPub string, e
 
 		return pubKeyStr, nil
 	} else if strings.HasPrefix(v, "curve25519") {
-		// https://www.rfc-editor.org/rfc/rfc7748.html#section-6.1
-		// not an actual public key
-		pub := make([]byte, 32)
-		curve25519.ScalarBaseMult((*[32]byte)(pub), (*[32]byte)(priv))
-		pubKeyStr := hexutil.Encode(pub)
+		if signer {
+			// derive actual private key from seed, then latter half as public key
+			p := ed25519.NewKeyFromSeed(priv)[32:]
+			return hexutil.Encode(p), nil
+		} else {
+			// https://www.rfc-editor.org/rfc/rfc7748.html#section-6.1
+			pub := make([]byte, 32)
+			curve25519.ScalarBaseMult((*[32]byte)(pub), (*[32]byte)(priv))
+			pubKeyStr := hexutil.Encode(pub)
 
-		return pubKeyStr, nil
+			return pubKeyStr, nil
+		}
 	} else {
 		return "", errors.New("upsupported version " + version)
 	}
@@ -73,32 +78,42 @@ func derivePublicKey(version string, privateKey string) (compressedPub string, e
 
 func generateEphemeralKeyPair(version, signerPubkey string) (compressedPub string, err error) {
 	priv, _ := generatePrivateKey()
-	pubStr, err := derivePublicKey(version, hexutil.Encode(priv))
+	pubStr, err := derivePublicKey(version, hexutil.Encode(priv), false)
 	if err != nil {
 		return "", err
 	}
 
 	if len(signerPubkey) > 0 {
-		v := strings.ToLower(version)
-		var sig []byte
-
-		if strings.HasPrefix(v, "secp256k1") {
-			// SHA256 first
-			sum := sha256.Sum256([]byte(pubStr))
-			sig, err = secp256k1.Sign(sum[:], signer)
-			if err != nil {
-				return "", err
-			}
-
-			sig = sig[:64]
-		} else if strings.HasPrefix(v, "curve25519") {
-			sig = ed25519.Sign(signer, []byte(pubStr))
+		sig, err := signInVersion(version, pubStr, signer)
+		if err != nil {
+			return "", err
 		}
 
 		pubStr = pubStr + hexutil.Encode(sig)[2:]
 	}
 
 	return pubStr, nil
+}
+
+func signInVersion(version string, msg string, signer []byte) ([]byte, error) {
+	v := strings.ToLower(version)
+
+	if strings.HasPrefix(v, "secp256k1") {
+		// SHA256 first
+		sum := sha256.Sum256([]byte(msg))
+		sig, err := secp256k1.Sign(sum[:], signer)
+		if err != nil {
+			return nil, err
+		}
+
+		sig = sig[:64]
+		return sig, nil
+	} else if strings.HasPrefix(v, "curve25519") {
+		pkey := ed25519.NewKeyFromSeed(signer)
+		return ed25519.Sign(pkey, []byte(msg)), nil
+	}
+
+	return nil, errors.New("unsupported version: " + version)
 }
 
 func generateWalletEntry(privateKey []byte) string {
@@ -120,15 +135,22 @@ func wrapPrivateKey(version, R, signerPubKey string, oob, salt []byte, account s
 	// verify signerPubKey TODO
 
 	//s, _ := generatePrivateKey() -- we use fixed value to generate test vectors
-	S, _ := derivePublicKey(version, hexutil.Encode(s))
+	S, _ := derivePublicKey(version, hexutil.Encode(s), false)
 
 	v := strings.ToLower(version)
 	RBytes, _ := hexutil.Decode(R)
 	var sharedSecret []byte
 
 	if strings.HasPrefix(v, "secp256k1") {
-		if len(signerPubKey) > 0 && !verifySecp256k1(RBytes[:33], RBytes[33:], signerPubKey) {
+		if len(signerPubKey) > 0 && !verifySecp256k1(R[:68], RBytes[33:], signerPubKey[:68]) {
 			return "", errors.New("signature verification failed")
+		}
+		if len(signerPubKey) > 68 { // signerPubKey is itself signed
+			signerPubKeyBytes, _ := hexutil.Decode(signerPubKey)
+			trustedPubKey, _ := derivePublicKey(version, hexutil.Encode(trusted), true)
+			if !verifySecp256k1(signerPubKey[:68], signerPubKeyBytes[33:], trustedPubKey) {
+				return "", errors.New("signature verification failed for signerPubKey")
+			}
 		}
 
 		Rx, Ry := secp256k1.DecompressPubkey(RBytes[:33])
@@ -140,8 +162,15 @@ func wrapPrivateKey(version, R, signerPubKey string, oob, salt []byte, account s
 		sharedSecret = make([]byte, 32) // compact representation https://www.rfc-editor.org/rfc/rfc5903.html section 9
 		SSx.FillBytes(sharedSecret)     // ensuring leading 00s if any
 	} else if strings.HasPrefix(v, "curve25519") {
-		if len(signerPubKey) > 0 && !verifyEd25519(RBytes[:32], RBytes[32:], signerPubKey) {
+		if len(signerPubKey) > 0 && !verifyEd25519(R[:66], RBytes[32:], signerPubKey[:66]) {
 			return "", errors.New("signature verification failed")
+		}
+		if len(signerPubKey) > 66 { // signerPubKey is itself signed
+			signerPubKeyBytes, _ := hexutil.Decode(signerPubKey)
+			trustedPubKey, _ := derivePublicKey(version, hexutil.Encode(trusted), true)
+			if !verifyEd25519(signerPubKey[:66], signerPubKeyBytes[32:], trustedPubKey) {
+				return "", errors.New("signature verification failed for signerPubKey")
+			}
 		}
 
 		sharedSecret, _ = curve25519.X25519(s, RBytes[:32])
@@ -168,8 +197,8 @@ func wrapPrivateKey(version, R, signerPubKey string, oob, salt []byte, account s
 	return S + cipher, err
 }
 
-func verifySecp256k1(msg, sig []byte, signerPubKey string) bool {
-	sum := sha256.Sum256(msg)
+func verifySecp256k1(msg string, sig []byte, signerPubKey string) bool {
+	sum := sha256.Sum256([]byte(msg))
 	signerPubBytes, _ := hexutil.Decode(signerPubKey)
 
 	if len(signerPubBytes) > 33 {
@@ -179,9 +208,14 @@ func verifySecp256k1(msg, sig []byte, signerPubKey string) bool {
 	return secp256k1.VerifySignature(signerPubBytes[:33], sum[:], sig) // the underlying library can handle compressed public key
 }
 
-func verifyEd25519(msg, sig []byte, signerPubKey string) bool {
-	pub, _ := hexutil.Decode(signerPubKey)
-	return ed25519.Verify(pub, msg, sig)
+func verifyEd25519(msg string, sig []byte, signerPubKey string) bool {
+	signerPubBytes, _ := hexutil.Decode(signerPubKey)
+
+	if len(signerPubBytes) > 32 {
+		// signerPubKey is further signed, check if it is signed by trusted public key
+	}
+
+	return ed25519.Verify(signerPubBytes[:32], []byte(msg), sig)
 }
 
 func encryptAesGcm(keySize int, data []byte, keys io.Reader) (string, error) {

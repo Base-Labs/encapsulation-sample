@@ -75,17 +75,23 @@ func roundTrip(version string, privateKey []byte) string {
 	fmt.Println("oob: " + hexutil.Encode(oob))
 	fmt.Println("salt: " + hexutil.Encode(salt))
 
-	R, _ := derivePublicKey(version, hexutil.Encode(r))
-	S, _ := derivePublicKey(version, hexutil.Encode(s))
-	signerPubKey, _ := derivePublicKey(version, hexutil.Encode(signer))
-	trustedKey, _ := derivePublicKey(version, hexutil.Encode(trusted))
+	R, _ := derivePublicKey(version, hexutil.Encode(r), false)
+	S, _ := derivePublicKey(version, hexutil.Encode(s), false)
+	signerPubKey, _ := derivePublicKey(version, hexutil.Encode(signer), true)
+	trustedPubKey, _ := derivePublicKey(version, hexutil.Encode(trusted), true)
 
 	fmt.Println("R: " + R)
 	fmt.Println("S: " + S)
 	fmt.Println("signerPubKey: " + signerPubKey)
-	fmt.Println("trustedKey: " + trustedKey)
+	fmt.Println("trustedPubKey: " + trustedPubKey)
 
-	cipher, e := wrapPrivateKey(version, R, "", oob, salt, addr)
+	sig, _ := signInVersion(version, R, signer)
+	sig2, _ := signInVersion(version, signerPubKey, trusted)
+
+	Rsig := R + hexutil.Encode(sig)[2:]
+	Singersig := signerPubKey + hexutil.Encode(sig2)[2:]
+
+	cipher, e := wrapPrivateKey(version, Rsig, Singersig, oob, salt, addr)
 	if e != nil {
 		fmt.Println(e.Error())
 		return ""
