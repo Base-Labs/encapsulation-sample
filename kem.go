@@ -132,9 +132,6 @@ func wrapPrivateKey(version, R, signerPubKey string, oob, salt []byte, account s
 		return "", errors.New("private key not found for account: " + account)
 	}
 
-	// verify signature to R
-	// verify signerPubKey TODO
-
 	//s, _ := generatePrivateKey() -- we use fixed value to generate test vectors
 	S, _ := derivePublicKey(version, hexutil.Encode(s), false)
 
@@ -203,20 +200,12 @@ func verifySecp256k1(msg string, sig []byte, signerPubKey string) bool {
 	sum := sha256.Sum256(msgBytes)
 	signerPubBytes, _ := hexutil.Decode(signerPubKey)
 
-	if len(signerPubBytes) > 33 {
-		// signerPubKey is further signed, check if it is signed by trusted public key
-	}
-
 	return secp256k1.VerifySignature(signerPubBytes[:33], sum[:], sig) // the underlying library can handle compressed public key
 }
 
 func verifyEd25519(msg string, sig []byte, signerPubKey string) bool {
 	signerPubBytes, _ := hexutil.Decode(signerPubKey)
 	msgBytes, _ := hexutil.Decode(msg)
-
-	if len(signerPubBytes) > 32 {
-		// signerPubKey is further signed, check if it is signed by trusted public key
-	}
 
 	return ed25519.Verify(signerPubBytes[:32], msgBytes, sig)
 }
